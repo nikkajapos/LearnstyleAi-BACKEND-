@@ -51,6 +51,7 @@ def login_view(request):
 
     email = request.data.get('email', '')
     password = request.data.get('password', '')
+    selected_role = request.data.get('role', '')
 
     user = authenticate(request, username=email, password=password)
     if user is None:
@@ -65,6 +66,11 @@ def login_view(request):
             {'detail': 'Invalid email or password.'},
             status=status.HTTP_401_UNAUTHORIZED
         )
+    if user.role != selected_role:
+        return Response(
+            {'detail': f'This account is not registered as {selected_role}.'},
+            status=status.HTTP_403_FORBIDDEN
+    )
 
     refresh = RefreshToken.for_user(user)
     return Response({
