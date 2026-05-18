@@ -221,7 +221,15 @@ def instructor_dashboard(request):
     if user.role != 'instructor':
         return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
 
-    students = User.objects.filter(instructor=user, role='student').order_by('first_name', 'last_name')
+    students = User.objects.filter(
+        role='student',
+        instructor_id=user.id
+    )
+    print("INSTRUCTOR:", user.username)
+    print("STUDENTS:", students.count())
+
+    for s in students:
+        print(s.username, s.section)
     student_data = InstructorStudentSerializer(students, many=True).data
     student_count = students.count()
 
