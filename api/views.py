@@ -3,7 +3,7 @@ from rest_framework import generics, status, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
-from django.db.models import Avg
+from django.db.models import Avg, Count
 from .models import AssessmentResult
 from .serializers import (
     RegisterSerializer,
@@ -109,30 +109,50 @@ def submit_assessment(request):
         )
 
     data = request.data
-    learning_style = data.get('learningStyle')
-    match_percentage = data.get('matchPercentage', 0)
-    score = data.get('score', 0)
-    vark = data.get('varkScores', {})
+
+    def to_int(value):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    vark_scores = data.get('varkScores', {})
+    visual = to_int(data.get('vark_visual', vark_scores.get('Visual', 0)))
+    auditory = to_int(data.get('vark_auditory', vark_scores.get('Auditory', 0)))
+    readwrite = to_int(data.get('vark_readwrite', vark_scores.get('Read/Write', 0)))
+    kinesthetic = to_int(data.get('vark_kinesthetic', vark_scores.get('Kinesthetic', 0)))
+
+    total = visual + auditory + readwrite + kinesthetic
+    percentages = {
+        'Visual': round((visual / total) * 100) if total > 0 else 0,
+        'Auditory': round((auditory / total) * 100) if total > 0 else 0,
+        'Read/Write': round((readwrite / total) * 100) if total > 0 else 0,
+        'Kinesthetic': round((kinesthetic / total) * 100) if total > 0 else 0,
+    }
+
+    learning_style = max(percentages, key=percentages.get) if total > 0 else ''
+    match_percentage = percentages.get(learning_style, 0)
+    score = match_percentage
 
     result = AssessmentResult.objects.create(
         student=user,
         learning_style=learning_style,
         match_percentage=match_percentage,
         score=score,
-        vark_visual=vark.get('Visual', 0),
-        vark_auditory=vark.get('Auditory', 0),
-        vark_readwrite=vark.get('Read/Write', 0),
-        vark_kinesthetic=vark.get('Kinesthetic', 0),
+        vark_visual=percentages['Visual'],
+        vark_auditory=percentages['Auditory'],
+        vark_readwrite=percentages['Read/Write'],
+        vark_kinesthetic=percentages['Kinesthetic'],
     )
 
     user.learning_style = learning_style
     user.match_percentage = match_percentage
     user.last_score = score
     user.assessment_date = result.taken_at.date()
-    user.vark_visual = vark.get('Visual', 0)
-    user.vark_auditory = vark.get('Auditory', 0)
-    user.vark_readwrite = vark.get('Read/Write', 0)
-    user.vark_kinesthetic = vark.get('Kinesthetic', 0)
+    user.vark_visual = percentages['Visual']
+    user.vark_auditory = percentages['Auditory']
+    user.vark_readwrite = percentages['Read/Write']
+    user.vark_kinesthetic = percentages['Kinesthetic']
     user.save()
 
     return Response(UserProfileSerializer(user).data)
@@ -201,14 +221,31 @@ def instructor_dashboard(request):
     if user.role != 'instructor':
         return Response({'detail': 'Forbidden.'}, status=status.HTTP_403_FORBIDDEN)
 
-    students = User.objects.filter(instructor=user, role='student')
+    students = User.objects.filter(instructor=user, role='student').order_by('first_name', 'last_name')
     student_data = InstructorStudentSerializer(students, many=True).data
+    student_count = students.count()
 
-    style_counts = {}
-    for s in students:
-        style = s.learning_style or 'Unknown'
-        style_counts[style] = style_counts.get(style, 0) + 1
-    distribution = [{'name': k, 'value': v} for k, v in style_counts.items()]
+    style_counts = (
+        students
+        .values('learning_style')
+        .annotate(value=Count('id'))
+        .order_by('-value', 'learning_style')
+    )
+    distribution = [
+        {'name': item['learning_style'] or 'Unknown', 'value': item['value']}
+        for item in style_counts
+    ]
+
+    section_counts = (
+        students
+        .values('section')
+        .annotate(count=Count('id'))
+        .order_by('section')
+    )
+    sections = [
+        {'section': item['section'] or 'Unassigned', 'count': item['count']}
+        for item in section_counts
+    ]
 
     from django.utils import timezone
     from datetime import timedelta
@@ -223,12 +260,15 @@ def instructor_dashboard(request):
         count = AssessmentResult.objects.filter(student__instructor=user, taken_at__date=d).count()
         weekly.append({'day': day, 'assessments': count})
 
-    avg_score = students.aggregate(avg=Avg('last_score'))['avg'] or 0
+    avg_score = AssessmentResult.objects.filter(student__instructor=user).aggregate(avg=Avg('match_percentage'))['avg'] or 0
 
     return Response({
-        'studentCount': students.count(),
-        'avgScore': round(avg_score, 1),
+        'studentCount': student_count,
+        'assignedStudents': student_data,
         'students': student_data,
+        'avgScore': round(avg_score, 1),
+        'section': user.section,
+        'sections': sections,
         'classDistribution': distribution,
         'weeklyActivity': weekly,
     })
